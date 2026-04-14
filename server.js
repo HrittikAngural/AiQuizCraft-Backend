@@ -18,8 +18,12 @@ connectDB();
 const app = express();
 
 // Middleware
-app.use(cors({ origin: process.env.FRONTEND_URL,
-   credentials: true, 
+app.use(cors({ 
+  origin: function (origin, callback) {
+    if (!origin) return callback(null, true);
+    return callback(null, origin);
+  },
+  credentials: true, 
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
 }));
 
