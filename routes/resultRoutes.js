@@ -1,10 +1,11 @@
 // backend/routes/resultRoutes.js
 import express from 'express';
-import { saveResult, getUserQuizHistory, getPerformanceDetails, getUserHistory, getUserRewards } from '../controllers/resultController.js';
+import { saveResult, getUserQuizHistory, getPerformanceDetails, getUserHistory, getUserRewards, getPopularTopics } from '../controllers/resultController.js';
 import { protect } from '../middlewares/authMiddleware.js';
 
 const router = express.Router();
 
+router.get('/popular-topics', getPopularTopics);
 router.post('/saveresult',protect,saveResult);
 router.get('/getresults',protect, getUserQuizHistory);
 router.get('/performance', protect, getPerformanceDetails);

@@ -1,5 +1,35 @@
 // backend/controllers/resultController.js
 import Result from '../models/Result.js';
+import TopicRequest from '../models/TopicRequest.js';
+
+export const getPopularTopics = async (req, res) => {
+  try {
+    const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const aggregateTopics = (model) => model.aggregate([
+      { $match: { createdAt: { $gte: since } } },
+      {
+        $group: {
+          _id: { $toLower: { $trim: { input: '$topic' } } },
+          topic: { $first: { $trim: { input: '$topic' } } },
+          count: { $sum: 1 }
+        }
+      },
+      { $sort: { count: -1, topic: 1 } },
+      { $limit: 12 },
+      { $project: { _id: 0, topic: 1, count: 1 } }
+    ]);
+    let topics = await aggregateTopics(TopicRequest);
+
+    if (!topics.length) {
+      topics = await aggregateTopics(Result);
+    }
+
+    res.status(200).json({ topics, periodDays: 30 });
+  } catch (error) {
+    console.error('Error fetching popular topics:', error);
+    res.status(500).json({ message: 'Failed to fetch popular topics' });
+  }
+};
 
 export const saveResult = async (req, res) => {
   const session = await Result.startSession();

@@ -1,64 +1,65 @@
-// Simple in-memory cache with TTL (Time To Live)
-class QuizCache {
-  constructor(ttlMs = 24 * 60 * 60 * 1000) { // 24 hours default
-    this.cache = new Map();
+// Recent question history prevents the same quiz from being served repeatedly.
+class QuizHistory {
+  constructor(ttlMs = 7 * 24 * 60 * 60 * 1000, maxTopics = 500, maxQuestions = 50) {
+    this.history = new Map();
     this.ttlMs = ttlMs;
+    this.maxTopics = maxTopics;
+    this.maxQuestions = maxQuestions;
   }
 
-  // Create a cache key from the quiz parameters
-  getCacheKey(topic, numQuestions, difficulty) {
-    return `quiz_${topic.toLowerCase().replace(/\s+/g, '_')}_${numQuestions}_${difficulty.toLowerCase()}`;
+  getKey(topic) {
+    return String(topic).trim().toLowerCase();
   }
 
-  // Get cached quiz if it exists and hasn't expired
-  get(topic, numQuestions, difficulty) {
-    const key = this.getCacheKey(topic, numQuestions, difficulty);
-    const cached = this.cache.get(key);
+  getRecentQuestions(topic) {
+    const key = this.getKey(topic);
+    const entry = this.history.get(key);
 
-    if (!cached) return null;
+    if (!entry) return [];
 
-    if (Date.now() - cached.timestamp > this.ttlMs) {
-      this.cache.delete(key);
-      return null;
+    if (Date.now() - entry.updatedAt > this.ttlMs) {
+      this.history.delete(key);
+      return [];
     }
 
-    console.log(`Cache hit for ${key}`);
-    return cached.data;
+    return entry.questions.map(question => question.text);
   }
 
-  // Store a quiz in cache
-  set(topic, numQuestions, difficulty, data) {
-    const key = this.getCacheKey(topic, numQuestions, difficulty);
-    this.cache.set(key, {
-      data,
-      timestamp: Date.now()
-    });
-    console.log(`Cached quiz: ${key}`);
+  remember(topic, questions) {
+    const key = this.getKey(topic);
+    const entry = this.history.get(key) || { questions: [], updatedAt: Date.now() };
+    const seen = new Set(entry.questions.map(question => question.normalized));
+
+    for (const question of questions) {
+      const text = String(question?.question || '').trim();
+      const normalized = text.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+      if (!normalized || seen.has(normalized)) continue;
+      entry.questions.push({ text, normalized });
+      seen.add(normalized);
+    }
+
+    entry.updatedAt = Date.now();
+    entry.questions = entry.questions.slice(-this.maxQuestions);
+    this.history.delete(key);
+    this.history.set(key, entry);
+
+    while (this.history.size > this.maxTopics) {
+      this.history.delete(this.history.keys().next().value);
+    }
   }
 
-  // Clear expired entries periodically
   cleanup() {
     const now = Date.now();
-    for (const [key, value] of this.cache.entries()) {
-      if (now - value.timestamp > this.ttlMs) {
-        this.cache.delete(key);
+    for (const [key, entry] of this.history.entries()) {
+      if (now - entry.updatedAt > this.ttlMs) {
+        this.history.delete(key);
       }
     }
   }
-
-  // Get cache stats
-  getStats() {
-    return {
-      size: this.cache.size,
-      entries: Array.from(this.cache.keys())
-    };
-  }
 }
 
-export const quizCache = new QuizCache();
+export const quizHistory = new QuizHistory();
 
-// Cleanup expired entries every 30 minutes
 setInterval(() => {
-  quizCache.cleanup();
-  console.log('Quiz cache cleaned up');
+  quizHistory.cleanup();
 }, 30 * 60 * 1000);

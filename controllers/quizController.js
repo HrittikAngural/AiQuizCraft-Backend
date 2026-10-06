@@ -1,5 +1,6 @@
 import Groq from 'groq-sdk';
-import { quizCache } from '../utils/cacheUtil.js';
+import TopicRequest from '../models/TopicRequest.js';
+import { quizHistory } from '../utils/cacheUtil.js';
 
 const DEFAULT_FALLBACK_MODELS = [
   'llama-3.1-8b-instant'
@@ -47,6 +48,12 @@ const isQuotaError = (err) => {
   return err?.status === 429 || msg.includes('quota') || msg.includes('too many requests');
 };
 
+const DIFFICULTY_GUIDANCE = {
+  easy: 'Test foundational knowledge with direct questions about one concept. Use clear wording and avoid trick questions or multi-step reasoning.',
+  medium: 'Test understanding and application in familiar scenarios. Include plausible distractors and require some interpretation or one-step reasoning.',
+  hard: 'Test deeper analysis with multi-step reasoning, edge cases, or combinations of related concepts. Use plausible distractors and avoid relying on obscure trivia.'
+};
+
 // Retry logic for temporary failures
 const retryWithBackoff = async (fn, maxRetries = 3, baseDelay = 1000) => {
   let lastError;
@@ -86,24 +93,18 @@ export const generateQuiz = async (req, res) => {
 
     const { prompt, topic, numQuestions, difficulty } = req.method === 'POST' ? req.body : req.query;
     
-    // Check cache if structured parameters are provided
-    if (topic && numQuestions && difficulty) {
-      const cachedQuiz = quizCache.get(topic, numQuestions, difficulty);
-      if (cachedQuiz) {
-        return res.json({
-          status: 'success',
-          data: cachedQuiz,
-          cached: true
-        });
-      }
-    }
-
     if (!prompt) {
       return res.status(400).json({
         status: 'error',
         message: 'Prompt is required'
       });
     }
+
+    const recentQuestions = topic
+      ? quizHistory.getRecentQuestions(topic).slice(-30)
+      : [];
+    const normalizedDifficulty = String(difficulty || 'medium').trim().toLowerCase();
+    const difficultyGuidance = DIFFICULTY_GUIDANCE[normalizedDifficulty] || DIFFICULTY_GUIDANCE.medium;
 
     // Wrap the API call with retry logic and dynamic model selection
     const generateContent = async () => {
@@ -150,7 +151,12 @@ export const generateQuiz = async (req, res) => {
           const messages = [
             {
               role: 'system',
-              content: 'You are an expert educational quiz generator. Output ONLY valid JSON containing an array of questions according to the requested format. Do not include markdown code blocks or any other explanation text.'
+              content: [
+                'You are an expert educational quiz generator. Output ONLY valid JSON containing an array of questions according to the requested format. Do not include markdown code blocks or any other explanation text.',
+                `The requested difficulty is ${normalizedDifficulty}. Apply it consistently to every question: ${difficultyGuidance}`,
+                'Every question in this quiz must be distinct and must not repeat any question from the recent-question list. Use different concepts, examples, and wording.',
+                recentQuestions.length ? `Recent questions to avoid: ${JSON.stringify(recentQuestions)}` : ''
+              ].filter(Boolean).join('\n')
             },
             {
               role: 'user',
@@ -225,9 +231,16 @@ export const generateQuiz = async (req, res) => {
           correctAnswer: typeof q.correctAnswer === 'number' ? q.correctAnswer : q.answer
         }));
         
-        // Cache the result if structured parameters are available
-        if (topic && numQuestions && difficulty) {
-          quizCache.set(topic, numQuestions, difficulty, validatedQuestions);
+        if (topic) {
+          quizHistory.remember(topic, validatedQuestions);
+          try {
+            await TopicRequest.create({
+              topic: String(topic).trim(),
+              userId: req.user._id
+            });
+          } catch (trackingError) {
+            console.error('Failed to record popular topic:', trackingError.message);
+          }
         }
         
         return res.json({
