@@ -89,6 +89,54 @@ export const getUserQuizHistory = async (req, res) => {
   }
 };
 
+export const getRecentSearchedTopics = async (req, res) => {
+  try {
+    const userId = req.user?._id || req.user?.id;
+    if (!userId) {
+      return res.status(401).json({ message: 'Unauthorized' });
+    }
+
+    const searches = await TopicRequest.find({ userId })
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .select('topic createdAt');
+
+    const recentTopics = [];
+    const seenTopics = new Set();
+    for (const search of searches) {
+      const normalizedTopic = search.topic.trim().toLowerCase();
+      if (!normalizedTopic || seenTopics.has(normalizedTopic)) continue;
+      seenTopics.add(normalizedTopic);
+      recentTopics.push(search);
+      if (recentTopics.length === 5) break;
+    }
+
+    if (recentTopics.length) {
+      return res.status(200).json(recentTopics);
+    }
+
+    const results = await Result.find({ userId })
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .select('topic createdAt');
+    const previousTopics = [];
+    seenTopics.clear();
+
+    for (const result of results) {
+      const normalizedTopic = result.topic.trim().toLowerCase();
+      if (!normalizedTopic || seenTopics.has(normalizedTopic)) continue;
+      seenTopics.add(normalizedTopic);
+      previousTopics.push(result);
+      if (previousTopics.length === 5) break;
+    }
+
+    res.status(200).json(previousTopics);
+  } catch (error) {
+    console.error('Error fetching recent searched topics:', error);
+    res.status(500).json({ message: 'Failed to fetch recent searched topics' });
+  }
+};
+
 export const getPerformanceDetails = async (req, res) => {
   try {
     const results = await Result.find({ userId: req.user._id })

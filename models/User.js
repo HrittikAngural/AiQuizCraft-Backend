@@ -13,16 +13,29 @@ const userSchema = new mongoose.Schema(
       type: String,
       required: [true, 'Please provide an email'],
       unique: true,
+      lowercase: true,
+      trim: true,
       match: [
-        /^\w+([\.-]?\w+)*@\w+([\.-]?\w+)*(\.\w{2,3})+$/,
+        /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/,
         'Please provide a valid email',
       ],
     },
     password: {
       type: String,
-      required: [true, 'Please provide a password'],
+      required: function requirePasswordForLocalAccounts() {
+        return !this.googleId;
+      },
       minlength: 6,
       select: false,
+    },
+    googleId: {
+      type: String,
+      unique: true,
+      sparse: true,
+    },
+    emailVerified: {
+      type: Boolean,
+      default: false,
     },
     quizHistory: [
       {
@@ -45,17 +58,16 @@ const userSchema = new mongoose.Schema(
 );
 
 // Hash password before saving
-userSchema.pre('save', async function (next) {
-  if (!this.isModified('password')) {
-    next();
-  }
+userSchema.pre('save', async function () {
+  if (!this.isModified('password') || !this.password) return;
   const salt = await bcrypt.genSalt(10);
   this.password = await bcrypt.hash(this.password, salt);
 });
 
 // Match password
 userSchema.methods.matchPassword = async function (enteredPassword) {
-  return await bcrypt.compare(enteredPassword, this.password);
+  if (!this.password || typeof enteredPassword !== 'string') return false;
+  return bcrypt.compare(enteredPassword, this.password);
 };
 
 // Generate JWT token
