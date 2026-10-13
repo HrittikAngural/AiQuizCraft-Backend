@@ -37,6 +37,11 @@ const userSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    photoUrl: {
+      type: String,
+      trim: true,
+      default: '',
+    },
     quizHistory: [
       {
         quizId: {

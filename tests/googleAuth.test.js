@@ -65,6 +65,7 @@ const verifiedPayload = {
   email: 'learner@example.com',
   email_verified: true,
   name: 'Quiz Learner',
+  picture: 'https://example.com/profile.jpg',
 };
 
 const callGoogleLogin = async (body = { idToken: 'google-id-token' }) => {
@@ -94,9 +95,11 @@ test('creates a Google account and issues the existing application JWT', async (
   assert.equal(lookupFilters[0].googleId, verifiedPayload.sub);
   assert.equal(createdUser.googleId, verifiedPayload.sub);
   assert.equal(createdUser.emailVerified, true);
+  assert.equal(createdUser.photoUrl, verifiedPayload.picture);
   assert.equal(response.statusCode, 200);
   assert.equal(response.body.token, 'application-jwt');
   assert.equal(response.body.user.id, 'user-123');
+  assert.equal(response.body.user.photoUrl, verifiedPayload.picture);
 });
 
 test('links an existing email account only to a verified Google identity', async (context) => {

@@ -1,6 +1,84 @@
 // backend/controllers/resultController.js
 import Result from '../models/Result.js';
+import User from '../models/User.js';
 import TopicRequest from '../models/TopicRequest.js';
+
+export const getLeaderboard = async (req, res) => {
+  try {
+    const period = String(req.query.period || 'all').toLowerCase();
+    const periodDays = { weekly: 7, monthly: 30, all: null };
+    if (!Object.hasOwn(periodDays, period)) {
+      return res.status(400).json({ message: 'Period must be weekly, monthly, or all.' });
+    }
+
+    const periodMatch = periodDays[period]
+      ? { createdAt: { $gte: new Date(Date.now() - periodDays[period] * 24 * 60 * 60 * 1000) } }
+      : {};
+    const rankedUsers = await Result.aggregate([
+      { $match: periodMatch },
+      {
+        $group: {
+          _id: '$userId',
+          points: { $sum: '$score' },
+          quizzes: { $sum: 1 },
+          correctAnswers: { $sum: '$score' },
+          totalQuestions: { $sum: '$totalQuestions' }
+        }
+      },
+      { $lookup: { from: User.collection.name, localField: '_id', foreignField: '_id', as: 'user' } },
+      { $unwind: '$user' },
+      {
+        $project: {
+          _id: 0,
+          userId: { $toString: '$_id' },
+          name: '$user.name',
+          points: 1,
+          quizzes: 1,
+          totalQuestions: 1,
+          correctAnswers: 1
+        }
+      },
+      { $sort: { points: -1, correctAnswers: -1, quizzes: -1, name: 1 } }
+    ]);
+
+    const allTimeResults = await Result.find({ userId: req.user.id })
+      .sort({ createdAt: -1 })
+      .select('topic subject score totalQuestions attempted createdAt reward');
+    const userId = String(req.user.id);
+    const currentIndex = rankedUsers.findIndex((entry) => entry.userId === userId);
+    const currentUser = await User.findById(req.user.id).select('name');
+    const selectedPeriodStats = currentIndex >= 0 ? rankedUsers[currentIndex] : null;
+    const allTimePoints = allTimeResults.reduce((sum, result) => sum + (Number(result.score) || 0), 0);
+    const allTimeQuestions = allTimeResults.reduce((sum, result) => sum + (Number(result.totalQuestions) || 0), 0);
+    const allTimeCorrect = allTimeResults.reduce((sum, result) => sum + (Number(result.score) || 0), 0);
+
+    return res.status(200).json({
+      period,
+      leaderboard: rankedUsers.slice(0, 100).map((entry, index) => ({
+        ...entry,
+        rank: index + 1,
+        level: Math.floor(entry.points / 100) + 1,
+        accuracy: entry.totalQuestions
+          ? Math.round((entry.correctAnswers / entry.totalQuestions) * 100)
+          : 0
+      })),
+      currentUser: {
+        id: userId,
+        name: currentUser?.name || 'You',
+        points: selectedPeriodStats?.points || 0,
+        rank: currentIndex >= 0 ? currentIndex + 1 : null,
+        allTimePoints,
+        quizzes: allTimeResults.length,
+        accuracy: allTimeQuestions ? Math.round((allTimeCorrect / allTimeQuestions) * 100) : 0,
+        level: Math.floor(allTimePoints / 100) + 1
+      },
+      myResults: allTimeResults
+    });
+  } catch (error) {
+    console.error('Error fetching leaderboard:', error);
+    return res.status(500).json({ message: 'Failed to fetch leaderboard.' });
+  }
+};
 
 export const getPopularTopics = async (req, res) => {
   try {
@@ -36,14 +114,12 @@ export const saveResult = async (req, res) => {
   session.startTransaction();
   
   try {
-    const { topic, score, totalQuestions, attempted, timeTaken, reward } = req.body;
-    
-    // More strict duplicate check
-    const existing = await Result.findOne({
-      userId: req.user._id,
-      topic,
-      createdAt: { $gt: new Date(Date.now() - 60 * 1000) }
-    }).session(session);
+    const { attemptId, topic, subject, score, totalQuestions, attempted, timeTaken, reward } = req.body;
+
+    const duplicateFilter = attemptId
+      ? { userId: req.user._id, attemptId }
+      : { userId: req.user._id, topic, createdAt: { $gt: new Date(Date.now() - 60 * 1000) } };
+    const existing = await Result.findOne(duplicateFilter).session(session);
     
     if (existing) {
       await session.commitTransaction();
@@ -52,7 +128,9 @@ export const saveResult = async (req, res) => {
     
     const result = new Result({
       userId: req.user._id,
+      attemptId,
       topic,
+      subject,
       score,
       totalQuestions,
       attempted,

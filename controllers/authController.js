@@ -10,6 +10,7 @@ const createSessionResponse = (res, user, status = 200) => {
       id: user._id,
       name: user.name,
       email: user.email,
+      photoUrl: user.photoUrl || '',
     },
   });
 };
@@ -52,6 +53,7 @@ export const registerUser = async (req, res) => {
         id: user._id,
         name: user.name,
         email: user.email,
+        photoUrl: user.photoUrl || '',
       },
     });
   } catch (error) {
@@ -97,6 +99,7 @@ export const loginUser = async (req, res) => {
         id: user._id,
         name: user.name,
         email: user.email,
+        photoUrl: user.photoUrl || '',
       },
     });
   } catch (error) {
@@ -139,6 +142,7 @@ export const googleLogin = async (req, res) => {
   const name = typeof payload.name === 'string' && payload.name.trim()
     ? payload.name.trim()
     : email.split('@')[0];
+  const photoUrl = typeof payload.picture === 'string' ? payload.picture : '';
   const emailLookup = new RegExp(`^${escapeRegex(email)}$`, 'i');
 
   try {
@@ -156,6 +160,7 @@ export const googleLogin = async (req, res) => {
 
         user.googleId = googleId;
         user.emailVerified = true;
+        if (photoUrl) user.photoUrl = photoUrl;
         await user.save();
       } else {
         user = await User.create({
@@ -163,8 +168,12 @@ export const googleLogin = async (req, res) => {
           email,
           googleId,
           emailVerified: true,
+          photoUrl,
         });
       }
+    } else if (photoUrl && user.photoUrl !== photoUrl) {
+      user.photoUrl = photoUrl;
+      await user.save();
     }
 
     return createSessionResponse(res, user);
