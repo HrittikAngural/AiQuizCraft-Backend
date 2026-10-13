@@ -49,9 +49,9 @@ const isQuotaError = (err) => {
 };
 
 const DIFFICULTY_GUIDANCE = {
-  easy: 'Test foundational knowledge with direct questions about one concept. Use clear wording and avoid trick questions or multi-step reasoning.',
-  medium: 'Test understanding and application in familiar scenarios. Include plausible distractors and require some interpretation or one-step reasoning.',
-  hard: 'Test deeper analysis with multi-step reasoning, edge cases, or combinations of related concepts. Use plausible distractors and avoid relying on obscure trivia.'
+  easy: 'Every question must test one foundational fact or concept using direct recall or a simple, familiar example. The answer should be apparent after understanding that one concept. Do not require multiple steps, combine concepts, or use edge cases.',
+  medium: 'Every question must test understanding or application in a familiar context and require interpretation or one reasoning step. Use plausible distractors. Do not make questions solvable by simple definition recall alone, but avoid multi-step analysis and obscure edge cases.',
+  hard: 'Every question must require applying at least two related concepts, completing multiple reasoning steps, or analyzing a meaningful edge case. Use non-obvious scenarios and plausible distractors based on common misconceptions. Do not ask simple definitions, isolated fact recall, or questions solvable with only one straightforward step. Difficulty must come from the reasoning required, not confusing wording or obscure trivia.'
 };
 
 // Retry logic for temporary failures
@@ -104,7 +104,15 @@ export const generateQuiz = async (req, res) => {
       ? quizHistory.getRecentQuestions(topic).slice(-30)
       : [];
     const normalizedDifficulty = String(difficulty || 'medium').trim().toLowerCase();
-    const difficultyGuidance = DIFFICULTY_GUIDANCE[normalizedDifficulty] || DIFFICULTY_GUIDANCE.medium;
+    if (!Object.hasOwn(DIFFICULTY_GUIDANCE, normalizedDifficulty)) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Difficulty must be easy, medium, or hard.'
+      });
+    }
+    const difficultyGuidance = DIFFICULTY_GUIDANCE[normalizedDifficulty];
+    const requestedQuestionCount = Math.max(1, Math.ceil(Number(numQuestions) || 10));
+    const outputTokenLimit = Math.min(6000, Math.max(2048, requestedQuestionCount * 500));
 
     // Wrap the API call with retry logic and dynamic model selection
     const generateContent = async () => {
@@ -152,8 +160,10 @@ export const generateQuiz = async (req, res) => {
             {
               role: 'system',
               content: [
-                'You are an expert educational quiz generator. Output ONLY valid JSON containing an array of questions according to the requested format. Do not include markdown code blocks or any other explanation text.',
-                `The requested difficulty is ${normalizedDifficulty}. Apply it consistently to every question: ${difficultyGuidance}`,
+                'You are an expert educational quiz generator. Output ONLY one valid JSON object in exactly this shape: {"questions":[{"question":"...","options":["...","...","...","..."],"correctAnswer":0,"explanation":"..."}]}. Do not include markdown, extra keys, or text outside the JSON object. correctAnswer must be a zero-based integer index into options. Keep each explanation concise.',
+                `The requested difficulty is ${normalizedDifficulty}. Apply these criteria to every question; do not include questions from an easier tier: ${difficultyGuidance}`,
+                'Keep the requested difficulty consistent across the entire quiz. Make each question independently meet the criteria, rather than relying on difficult vocabulary or a single hard question to set the level.',
+                `Return exactly ${requestedQuestionCount} questions.`,
                 'Every question in this quiz must be distinct and must not repeat any question from the recent-question list. Use different concepts, examples, and wording.',
                 recentQuestions.length ? `Recent questions to avoid: ${JSON.stringify(recentQuestions)}` : ''
               ].filter(Boolean).join('\n')
@@ -170,7 +180,7 @@ export const generateQuiz = async (req, res) => {
               model: candidateModel,
               response_format: { type: 'json_object' },
               temperature: 0.7,
-              max_tokens: 2048,
+              max_tokens: outputTokenLimit,
             });
           } catch (requestError) {
             const requestMessage = (requestError?.message || '').toLowerCase();
@@ -182,7 +192,8 @@ export const generateQuiz = async (req, res) => {
             result = await groq.chat.completions.create({
               messages,
               model: candidateModel,
-              temperature: 0.7
+              temperature: 0.7,
+              max_tokens: outputTokenLimit
             });
           }
           return result.choices[0]?.message?.content || '';
@@ -216,48 +227,63 @@ export const generateQuiz = async (req, res) => {
     };
 
     const text = await retryWithBackoff(generateContent);
-
-    // Clean markdown formatting if present
-    let cleanText = text.replace(/```json|```/g, '').trim();
-    
+    let parsed;
     try {
-      const parsed = JSON.parse(cleanText);
-      
-      // Validate questions structure
-      if (Array.isArray(parsed.questions || parsed)) {
-        const questions = parsed.questions || parsed;
-        const validatedQuestions = questions.map(q => ({
-          ...q,
-          correctAnswer: typeof q.correctAnswer === 'number' ? q.correctAnswer : q.answer
-        }));
-        
-        if (topic) {
-          quizHistory.remember(topic, validatedQuestions);
-          try {
-            await TopicRequest.create({
-              topic: String(topic).trim(),
-              userId: req.user._id
-            });
-          } catch (trackingError) {
-            console.error('Failed to record popular topic:', trackingError.message);
-          }
-        }
-        
-        return res.json({
-          status: 'success',
-          data: validatedQuestions,
-          cached: false
-        });
-      }
-      
-      throw new Error('Invalid question format');
+      const cleanText = text.replace(/```(?:json)?/gi, '').trim();
+      parsed = JSON.parse(cleanText);
     } catch (parseError) {
-      console.error('JSON parsing error:', parseError);
-      return res.status(400).json({
+      console.error('AI returned invalid quiz JSON:', parseError.message);
+      return res.status(502).json({
         status: 'error',
-        message: 'AI response format invalid. Expected array of questions with correctAnswer field.'
+        message: 'The AI returned an incomplete or invalid quiz response. Please try again.'
       });
     }
+
+    let questions = parsed;
+    for (let depth = 0; depth < 3 && !Array.isArray(questions); depth += 1) {
+      if (typeof questions === 'string') {
+        try {
+          questions = JSON.parse(questions);
+        } catch {
+          break;
+        }
+      } else if (questions && typeof questions === 'object') {
+        questions = questions.questions ?? questions.data ?? questions.quiz;
+      } else {
+        break;
+      }
+    }
+
+    if (!Array.isArray(questions) || !questions.length) {
+      console.error('AI response did not contain a non-empty questions array.');
+      return res.status(502).json({
+        status: 'error',
+        message: 'The AI returned a quiz in an unexpected format. Please try again.'
+      });
+    }
+
+    const validatedQuestions = questions.map(question => ({
+      ...question,
+      correctAnswer: typeof question.correctAnswer === 'number' ? question.correctAnswer : question.answer
+    }));
+
+    if (topic) {
+      quizHistory.remember(topic, validatedQuestions);
+      try {
+        await TopicRequest.create({
+          topic: String(topic).trim(),
+          userId: req.user._id
+        });
+      } catch (trackingError) {
+        console.error('Failed to record popular topic:', trackingError.message);
+      }
+    }
+
+    return res.json({
+      status: 'success',
+      data: validatedQuestions,
+      cached: false
+    });
   } catch (error) {
     console.error('Quiz generation error:', error);
     
@@ -287,4 +313,3 @@ export const generateQuiz = async (req, res) => {
     });
   }
 };
-
