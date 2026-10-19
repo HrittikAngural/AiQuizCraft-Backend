@@ -2,6 +2,7 @@
 import Result from '../models/Result.js';
 import User from '../models/User.js';
 import TopicRequest from '../models/TopicRequest.js';
+import { getPointsPerCorrectAnswer, normalizeDifficulty } from '../utils/quizScoring.js';
 
 export const getLeaderboard = async (req, res) => {
   try {
@@ -19,7 +20,7 @@ export const getLeaderboard = async (req, res) => {
       {
         $group: {
           _id: '$userId',
-          points: { $sum: '$score' },
+          points: { $sum: { $ifNull: ['$points', '$score'] } },
           quizzes: { $sum: 1 },
           correctAnswers: { $sum: '$score' },
           totalQuestions: { $sum: '$totalQuestions' }
@@ -43,12 +44,15 @@ export const getLeaderboard = async (req, res) => {
 
     const allTimeResults = await Result.find({ userId: req.user.id })
       .sort({ createdAt: -1 })
-      .select('topic subject score totalQuestions attempted createdAt reward');
+      .select('topic subject score points difficulty totalQuestions attempted createdAt reward');
     const userId = String(req.user.id);
     const currentIndex = rankedUsers.findIndex((entry) => entry.userId === userId);
     const currentUser = await User.findById(req.user.id).select('name');
     const selectedPeriodStats = currentIndex >= 0 ? rankedUsers[currentIndex] : null;
-    const allTimePoints = allTimeResults.reduce((sum, result) => sum + (Number(result.score) || 0), 0);
+    const allTimePoints = allTimeResults.reduce(
+      (sum, result) => sum + (Number(result.points ?? result.score) || 0),
+      0
+    );
     const allTimeQuestions = allTimeResults.reduce((sum, result) => sum + (Number(result.totalQuestions) || 0), 0);
     const allTimeCorrect = allTimeResults.reduce((sum, result) => sum + (Number(result.score) || 0), 0);
 
@@ -114,7 +118,58 @@ export const saveResult = async (req, res) => {
   session.startTransaction();
   
   try {
-    const { attemptId, topic, subject, score, totalQuestions, attempted, timeTaken, reward } = req.body;
+    const {
+      attemptId,
+      topic,
+      subject,
+      isSubjectQuiz,
+      score,
+      difficulty: submittedDifficulty,
+      totalQuestions,
+      attempted,
+      timeTaken,
+      reward
+    } = req.body;
+    const difficulty = normalizeDifficulty(submittedDifficulty);
+    const questions = Array.isArray(req.body.questions) ? req.body.questions : [];
+    const selectedOptions = req.body.selectedOptions && typeof req.body.selectedOptions === 'object'
+      ? req.body.selectedOptions
+      : {};
+    const answerDetails = questions.flatMap((question, index) => {
+      if (
+        typeof question?.question !== 'string' ||
+        !Array.isArray(question.options) ||
+        !question.options.every((option) => typeof option === 'string') ||
+        !Number.isInteger(question.correctAnswer) ||
+        question.correctAnswer < 0 ||
+        question.correctAnswer >= question.options.length
+      ) {
+        return [];
+      }
+
+      const selectedOption = selectedOptions[index];
+      return [{
+        question: question.question,
+        options: question.options,
+        correctAnswer: question.correctAnswer,
+        selectedOption: Number.isInteger(selectedOption) &&
+          selectedOption >= 0 &&
+          selectedOption < question.options.length
+          ? selectedOption
+          : null,
+        explanation: typeof question.explanation === 'string' ? question.explanation : ''
+      }];
+    });
+    const correctAnswers = questions.length
+      ? answerDetails.filter((answer) => answer.selectedOption === answer.correctAnswer).length
+      : Number(score) || 0;
+    const scoreValue = questions.length ? correctAnswers : score;
+    const pointsPerCorrectAnswer = getPointsPerCorrectAnswer({
+      isSubjectQuiz,
+      subject,
+      difficulty,
+    });
+    const points = correctAnswers * pointsPerCorrectAnswer;
 
     const duplicateFilter = attemptId
       ? { userId: req.user._id, attemptId }
@@ -131,11 +186,14 @@ export const saveResult = async (req, res) => {
       attemptId,
       topic,
       subject,
-      score,
+      score: scoreValue,
+      points,
+      difficulty,
       totalQuestions,
       attempted,
       timeTaken,
-      reward
+      reward,
+      answerDetails
     });
     
     await result.save({ session });
@@ -268,7 +326,7 @@ export const getUserHistory = async (req, res) => {
   try {
     const results = await Result.find({ userId: req.user.id })
       .sort({ createdAt: -1 })
-      .select('-userId'); // Exclude userId field
+      .select('-userId');
     
     res.status(200).json(results);
   } catch (err) {
